@@ -1,0 +1,11 @@
+version: "3.0"
+services:
+  database:
+    image: mongo:latest
+  app:
+    image: spaceapi-radar/push-server
+    build: .
+    depends_on:
+      - database
+    ports:
+      - 8080:8080
