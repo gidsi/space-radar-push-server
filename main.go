@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/oliveroneill/exponent-server-sdk-golang/sdk"
-	"github.com/pkg/errors"
+	"github.com/robfig/cron"
 	"github.com/rs/cors"
 	"goji.io"
 	"goji.io/pat"
@@ -13,7 +13,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"reflect"
 	"strings"
 )
 
@@ -27,12 +26,16 @@ type collectorEntry struct {
 	Valid    bool   `json:"valid"`
 	LastSeen int64  `json:"lastSeen,omitempty"`
 	ErrMsg   string `json:"errMsg,omitempty"`
-	Data	 interface{} `json:"data,omitempty"`
+	Data	 dataEntry `json:"data,omitempty"`
+}
+
+type dataEntry struct {
+	State state `json:"state"`
 }
 
 type state struct {
-	Open bool
-	LastChange int64
+	Open bool `json:"open"`
+	LastChange int64 `json:"lastchange"`
 }
 
 var mongoSession *mgo.Session
@@ -53,7 +56,7 @@ func init() {
 func main() {
 	loadPersistentDirectory()
 
-	/* c := cron.New()
+	c := cron.New()
 	err := c.AddFunc("@every 1m", func() {
 		checkDirectory()
 	})
@@ -61,9 +64,7 @@ func main() {
 		log.Printf("Can't start rebuilding directory cron %v", err)
 	} else {
 		c.Start()
-	} */
-	checkDirectory()
-	checkDirectory()
+	}
 
 	co := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
@@ -85,20 +86,15 @@ func checkDirectory() {
 	newDirectory := getDirectory()
 
 	for url, value := range newDirectory {
-		fmt.Println(url)
-		state, err := getState(value)
-		if err != nil {
-			for oUrl, oValue := range directory {
-				if oUrl == url {
-					oState, oErr := getState(oValue)
-					if oErr != nil {
-						fmt.Println("didn't work on old state")
-						fmt.Println(state)
-						fmt.Println(oState)
-						fmt.Println(oErr)
-					} else {
-						fmt.Println("NOT AN ERROR!")
-					}
+		state := value.Data.State
+		for oUrl, oValue := range directory {
+			if oUrl == url {
+				oState := oValue.Data.State
+				if state.LastChange != oState.LastChange &&
+					state.Open != oState.Open {
+					log.Printf("A space has changed, %s", url)
+					log.Println(state)
+					log.Println(oState)
 				}
 			}
 		}
@@ -137,62 +133,6 @@ func persistDirectory() {
 		log.Println(err)
 		panic("can't write api directory to file")
 	}
-}
-
-func getState(entry collectorEntry) (state, error) {
-	ret := state{}
-	if entry.Data == nil {
-		return ret, errors.New("no data")
-	}
-
-	foo := reflect.ValueOf(entry.Data)
-	value, err := getKeyFromValueMap("state", foo)
-	if err != nil {
-		return state{}, err
-	} else {
-		fmt.Println("state is")
-		fmt.Println(value)
-	}
-
-	openVal, err := getKeyFromValueMap("open", value)
-	if err != nil {
-		fmt.Println("openVal is err and")
-		fmt.Println(value)
-		return state{}, err
-	} else {
-		fmt.Println("openVal is")
-		fmt.Println(openVal.Bool())
-		ret.Open = openVal.Bool()
-	}
-
-	lastChangeVal, err := getKeyFromValueMap("lastchange", value)
-	if err != nil {
-		ret.LastChange = 0
-	} else {
-		ret.LastChange = lastChangeVal.Int()
-	}
-
-	return ret, nil
-}
-
-func getKeyFromValueMap(key string, entry reflect.Value) (reflect.Value, error) {
-	if entry.IsValid() {
-		if entry.Kind() == reflect.Map {
-			for _, b := range entry.MapKeys() {
-				if b.String() == key {
-					return entry.MapIndex(b), nil
-				}
-			}
-		} else if entry.Kind() == reflect.Interface {
-			fmt.Println("interface")
-			fmt.Println(entry.Interface())
-			foo := entry.Interface()
-
-			// entry.FieldByName(key)
-		}
-	}
-
-	return reflect.Value{}, errors.New("cant kind key: " + key)
 }
 
 func getDirectory() map[string]collectorEntry {
