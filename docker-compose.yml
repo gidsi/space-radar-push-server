@@ -9,3 +9,11 @@ services:
       - database
     ports:
       - 8080:8080
+  gui:
+    image: mongo-express
+    ports:
+      - 8081:8081
+    depends_on:
+      - database
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=database

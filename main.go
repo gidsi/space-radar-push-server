@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/oliveroneill/exponent-server-sdk-golang/sdk"
@@ -13,7 +14,10 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"strings"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 type appRegister struct {
@@ -31,6 +35,7 @@ type collectorEntry struct {
 
 type dataEntry struct {
 	State state `json:"state"`
+	Space string `json:"space"`
 }
 
 type state struct {
@@ -38,22 +43,27 @@ type state struct {
 	LastChange int64 `json:"lastchange"`
 }
 
-var mongoSession *mgo.Session
 var mongoDb = "spaceradar"
 var directory map[string]collectorEntry
 
-func init() {
+func getMongoSession() *mgo.Session {
 	mongoSession, err := mgo.Dial("database")
 
 	if err != nil {
-		log.Print("Error: ", err)
-		return
+		panic(err)
 	}
 
 	mongoSession.SetMode(mgo.Monotonic, true)
+	return mongoSession
 }
 
 func main() {
+	sigs := make(chan os.Signal, 1)
+	done := make(chan bool, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+
+	log.Println("starting service...")
 	loadPersistentDirectory()
 
 	c := cron.New()
@@ -65,7 +75,6 @@ func main() {
 	} else {
 		c.Start()
 	}
-
 	co := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
 	})
@@ -74,15 +83,33 @@ func main() {
 	mux.Use(co.Handler)
 
 	mux.HandleFunc(pat.Post("/users/push-token"), registerUser)
-	mux.HandleFunc(pat.Get("/push"), push)
 
-	defer mongoSession.Close()
+	srv := &http.Server{Addr: ":8080", Handler: mux}
+	go func() {
+		httpError := srv.ListenAndServe()
+		if httpError != nil {
+			log.Println("While serving HTTP: ", httpError)
+		}
+	}()
 
-	log.Println("starting api...")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+
+	go func() {
+		<-sigs
+		ctx, _ := context.WithTimeout(context.Background(), 10 * time.Second)
+		err = srv.Shutdown(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		done <- true
+	}()
+
+	log.Println("service started")
+	<-done
+	log.Println("service closed")
 }
 
 func checkDirectory() {
+	log.Println("Checking directory")
 	newDirectory := getDirectory()
 
 	for url, value := range newDirectory {
@@ -92,9 +119,7 @@ func checkDirectory() {
 				oState := oValue.Data.State
 				if state.LastChange != oState.LastChange &&
 					state.Open != oState.Open {
-					log.Printf("A space has changed, %s", url)
-					log.Println(state)
-					log.Println(oState)
+					pushSpaceChange(url, state)
 				}
 			}
 		}
@@ -102,6 +127,31 @@ func checkDirectory() {
 
 	directory = newDirectory
 	persistDirectory()
+}
+
+func pushSpaceChange(url string, state state) {
+	space := directory[url]
+	open := "closed"
+	if state.Open {
+		open = "open"
+	}
+	message := fmt.Sprintf("status changed to %s", open)
+
+	mongoSession := getMongoSession()
+	defer mongoSession.Close()
+
+	var result []appRegister
+	err := mongoSession.DB(mongoDb).C("registrations").Find(bson.M{"favoritespace": url}).All(&result)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	log.Printf("Sending push message: '%s', for space: %s to %d recipients", message, space.Data.Space, len(result))
+	log.Printf("Spacedata: %v", space)
+	for _, registration := range result {
+		sendPushMessage(registration.Token, space.Data.Space, message)
+	}
 }
 
 func loadPersistentDirectory() bool {
@@ -122,7 +172,6 @@ func loadPersistentDirectory() bool {
 }
 
 func persistDirectory() {
-	log.Println("writing...")
 	spaceApiDirectoryJson, err := json.Marshal(directory)
 	if err != nil {
 		log.Println(err)
@@ -182,21 +231,7 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func push(w http.ResponseWriter, _ *http.Request) {
-	var result []appRegister
-	err := mongoSession.DB(mongoDb).C("registrations").Find(nil).All(&result)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	for _, registration := range result {
-		sendPushMessage(registration.Token, strings.Join(registration.FavoriteSpace, ",\n"))
-	}
-	w.WriteHeader(200)
-}
-
-func sendPushMessage(token string, message string) {
+func sendPushMessage(token string, title string, message string) {
 	pushToken, err := expo.NewExponentPushToken(token)
 	if err != nil {
 		panic(err)
@@ -212,7 +247,7 @@ func sendPushMessage(token string, message string) {
 			Body:     message,
 			Data:     map[string]string{"withSome": "data"},
 			Sound:    "default",
-			Title:    "status changed",
+			Title:    title,
 			Priority: expo.DefaultPriority,
 		},
 	)
@@ -229,6 +264,9 @@ func sendPushMessage(token string, message string) {
 }
 
 func save(registration appRegister) error {
+	mongoSession := getMongoSession()
+	defer mongoSession.Close()
+
 	upsertdata := bson.M{ "$set": registration}
 
 	_, err := mongoSession.DB(mongoDb).C("registrations").UpsertId( registration.Token, upsertdata )
