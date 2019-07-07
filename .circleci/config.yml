@@ -15,7 +15,7 @@ jobs:
           tar -xz -C /tmp -f /tmp/docker-$VER.tgz
           mv /tmp/docker/* /usr/bin
     - run: docker login -u $DOCKER_USER -p $DOCKER_PASS
-    - run: cd api && docker build -t spaceradar/push-server .
+    - run: docker build -t spaceradar/push-server .
     - run: |
         docker tag spaceradar/push-server spaceradar/push-server:$CIRCLE_SHA1
         docker push spaceradar/push-server:$CIRCLE_SHA1
