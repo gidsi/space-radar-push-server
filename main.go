@@ -117,8 +117,7 @@ func checkDirectory() {
 		for oUrl, oValue := range directory {
 			if oUrl == url {
 				oState := oValue.Data.State
-				if state.LastChange != oState.LastChange &&
-					state.Open != oState.Open {
+				if state.Open != oState.Open {
 					pushSpaceChange(url, state)
 				}
 			}
